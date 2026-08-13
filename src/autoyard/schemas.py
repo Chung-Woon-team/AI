@@ -390,7 +390,7 @@ class Move(BaseModel):
     sequence: int
     reason: str
     distance_meters: float
-    # 진입도로 ↔ 진입도로 구간만 담는다(슬롯 자체는 경로 탐색 그래프에 없음, mapf.py 참고).
+    # 도로 경로뿐 아니라 마지막 진입도로에서 실제 to_slot 까지의 주차 동선도 포함한다.
     path: list[PathStep] = Field(default_factory=list)
 
 
