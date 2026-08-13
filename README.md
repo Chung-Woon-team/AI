@@ -35,6 +35,22 @@ React ──REST──▶ Spring (:8080) ──내부 호출──▶ Python Fas
 **스프링이 유일한 공개 API 창구다.** 프론트는 스프링만 알면 되고, 파이썬은 스프링만 부른다.
 API 목록은 서버를 띄우고 http://localhost:8080/swagger-ui/index.html 에서 볼 수 있다.
 
+## 배포 주소 (Cloud Run · asia-northeast3)
+
+| 파트 | URL |
+|---|---|
+| 프론트 | https://autoyard-copilot-front-145786632792.asia-northeast3.run.app |
+| 백엔드 | https://back-end-git-145786632792.asia-northeast3.run.app |
+| AI | https://autoyard-copilot-ai-145786632792.asia-northeast3.run.app |
+
+- 백엔드 Swagger: https://back-end-git-145786632792.asia-northeast3.run.app/swagger-ui/index.html
+- AI 헬스체크: https://autoyard-copilot-ai-145786632792.asia-northeast3.run.app/health
+  → `gemini_enabled` 가 **true** 여야 실제 Gemini 를 탄다. false 면 키가 안 들어간 것이고,
+    그 상태에서도 서버는 200 으로 **고정 더미 데이터**를 돌려준다.
+
+스프링에는 `AI_BASE_URL` 로 위 AI 주소를 넣는다. 파이썬에는 백엔드 주소를 넣을 필요가 없다 —
+호출 방향이 Spring → Python 단방향이다.
+
 ## 야드 격자
 
 도면대로 **56 × 56** (4 + 22 + 4 + 22 + 4). 22×22 블록 4개, 주차칸 1,936 · 도로칸 1,200.
