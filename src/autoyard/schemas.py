@@ -187,7 +187,7 @@ class CargoLine(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     description: str
-    unit_count: int = Field(gt=0)
+    unit_count: int = Field(ge=1)
     brand: str | None = None
     model: str | None = None
     height_meters: float | None = None
@@ -224,7 +224,7 @@ class BillOfLadingExtraction(BaseModel):
 
     # 화물
     cargo_lines: list[CargoLine] = Field(default_factory=list)
-    unit_count: int = Field(gt=0)
+    unit_count: int = Field(ge=1)
     gross_weight_kg: int | None = None
     measurement_cbm: float | None = None
 

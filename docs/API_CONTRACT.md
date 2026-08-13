@@ -74,6 +74,27 @@ http://localhost:8080/v3/api-docs          (JSON)
 }
 ```
 
+### 선하증권
+
+| Method | Path | 용도 |
+|---|---|---|
+| `POST` | `/api/bill-of-ladings/extract` | 선하증권 이미지 업로드 → 저장 + 차량 전개 |
+
+스프링이 내부적으로 `POST /internal/extract/bl`(AI)을 호출해 `BillOfLadingExtraction`을 받고,
+`BillOfLading` 1행 + `Vehicle` N행으로 전개해 저장한다(VIN range 전개, SEQ 배분 — 결정론적 코드,
+AI 아님. docs/DOMAIN.md 4-1절).
+
+```jsonc
+// POST /api/bill-of-ladings/extract  (multipart/form-data, key="file")
+// → {
+//   "success": true,
+//   "data": { "bl_number": "NXR-USN-NTD-26081101", "vehicle_count": 60,
+//              "vehicle_ids": ["V-0001", "V-0002", "..."] }
+// }
+```
+
+AI 서비스가 죽어 있으면 `{"success": false, "error": {"code": "AI_UNAVAILABLE", ...}}`.
+
 ### 야드 상태 (최적화 입력)
 
 | Method | Path | 용도 |
