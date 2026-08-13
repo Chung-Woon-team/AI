@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from datetime import datetime
 
 from google import genai
@@ -49,7 +50,39 @@ logger = logging.getLogger(__name__)
 
 
 def _client() -> genai.Client:
-    return genai.Client(api_key=settings.gemini_api_key)
+    # 타임아웃을 명시하지 않으면 SDK 기본값에 끌려가 사실상 무제한이다. 과부하(503) 때
+    # 78초까지 매달린 적이 있고, 그러면 스프링이 60초에 먼저 끊어서 폴백이 사용자에게
+    # 도달하지 못한다. 상한을 걸어 그 전에 폴백으로 떨어뜨린다.
+    return genai.Client(
+        api_key=settings.gemini_api_key,
+        http_options=types.HttpOptions(timeout=settings.gemini_timeout_ms),
+    )
+
+
+def _is_quota_error(exc: Exception) -> bool:
+    """429 RESOURCE_EXHAUSTED 인가. 할당량은 재시도해도 같은 답이 온다.
+
+    SDK 예외 타입이 버전마다 달라 문자열로 판정한다. 넓게 잡아 오판해도 손해는
+    '재시도 1회를 건너뛴다' 뿐이고, 그 경우도 폴백 경로로 정상 응답이 나간다.
+    """
+    text = str(exc)
+    return "RESOURCE_EXHAUSTED" in text or "429" in text
+
+
+def _guard_retry(exc: Exception, started: float, failure_cls: type[Exception]) -> None:
+    """재시도가 무의미하거나 시간 예산을 넘겼으면 여기서 실패로 끝낸다.
+
+    재시도를 무조건 하면 느린 실패에서 대기 시간이 두 배가 되고, 스프링(read timeout 60초)이
+    먼저 끊어버린다. 빨리 폴백으로 떨어지는 쪽이 사용자에게 이득이다.
+    """
+    if _is_quota_error(exc):
+        raise failure_cls(f"Gemini 할당량 초과라 재시도하지 않는다: {exc}") from exc
+
+    elapsed = time.monotonic() - started
+    if elapsed > settings.gemini_retry_budget_seconds:
+        raise failure_cls(
+            f"첫 호출이 {elapsed:.1f}초 걸려 재시도하지 않는다(스프링 타임아웃 보호): {exc}"
+        ) from exc
 
 
 # --------------------------------------------------------------------------
@@ -162,10 +195,15 @@ def _call_once_text(client: genai.Client, prompt: str) -> str:
 
 
 def _call_with_retry_text(client: genai.Client, prompt: str) -> str:
-    """API 호출 자체(네트워크/서버 오류)가 실패하면 1회만 재시도한다."""
+    """API 호출 자체(네트워크/서버 오류)가 실패하면 1회만 재시도한다.
+
+    단 할당량 초과이거나 첫 호출이 이미 오래 걸렸으면 재시도하지 않는다(_guard_retry).
+    """
+    started = time.monotonic()
     try:
         return _call_once_text(client, prompt)
     except Exception as first_exc:  # noqa: BLE001 - SDK 예외 타입이 다양해 넓게 잡는다
+        _guard_retry(first_exc, started, ParsingFailed)
         logger.warning("Gemini 호출 실패, 재시도: %s", first_exc)
         try:
             return _call_once_text(client, prompt)
@@ -320,11 +358,17 @@ def _call_once_image(client: genai.Client, image_bytes: bytes, mime_type: str, p
 def _call_with_retry_image(
     client: genai.Client, image_bytes: bytes, mime_type: str, prompt: str
 ) -> str:
-    """API 호출 자체(네트워크/서버 오류)가 실패하면 1회만 재시도한다."""
+    """API 호출 자체(네트워크/서버 오류)가 실패하면 1회만 재시도한다.
+
+    단 할당량 초과이거나 첫 호출이 이미 오래 걸렸으면 재시도하지 않는다(_guard_retry).
+    이미지 호출은 정상일 때도 30초 넘게 걸려서, 재시도까지 하면 스프링이 먼저 끊는다.
+    """
     # SDK 가 던지는 예외 타입이 네트워크 오류부터 API 오류까지 다양해 넓게 잡는다.
+    started = time.monotonic()
     try:
         return _call_once_image(client, image_bytes, mime_type, prompt)
     except Exception as first_exc:  # noqa: BLE001
+        _guard_retry(first_exc, started, ExtractionFailed)
         logger.warning("Gemini 호출 실패, 재시도: %s", first_exc)
         try:
             return _call_once_image(client, image_bytes, mime_type, prompt)

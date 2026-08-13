@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 
 from fastapi import APIRouter, File, UploadFile
+from fastapi.concurrency import run_in_threadpool
 
 from autoyard import gemini_client
 from autoyard.config import settings
@@ -30,8 +31,13 @@ async def extract_bill_of_lading(file: UploadFile = File(...)) -> BillOfLadingEx
     image_bytes = await file.read()
     mime_type = file.content_type or "image/jpeg"
 
+    # ⚠️ run_in_threadpool 로 감싸는 이유 — gemini_client 는 동기 블로킹 SDK 다.
+    # async 핸들러 안에서 그대로 부르면 이벤트 루프가 통째로 멈춰서, 이 인스턴스가 처리 중인
+    # 다른 요청이 전부 같이 밀린다. 실측으로 /health 가 86초, /internal/replan 이 78초까지
+    # 밀렸다 — 사진 한 장 올리는 동안 AI 서버 전체가 마비된 것이다.
+    # (parse·replan·brief 라우터는 async 가 아닌 def 라 FastAPI 가 알아서 스레드풀로 돌린다.)
     try:
-        return gemini_client.extract_bill_of_lading(image_bytes, mime_type)
+        return await run_in_threadpool(gemini_client.extract_bill_of_lading, image_bytes, mime_type)
     except gemini_client.ExtractionFailed as exc:
         logger.warning("선하증권 추출 실패, 폴백으로 대체: %s", exc)
         return FALLBACK_BILL_OF_LADING
@@ -55,8 +61,11 @@ async def extract_grid(
     image_bytes = await file.read()
     mime_type = file.content_type or "image/jpeg"
 
+    # 위 /bl 과 같은 이유로 스레드풀에서 돌린다 (동기 블로킹 SDK → 이벤트 루프 정지).
     try:
-        return gemini_client.extract_grid_observation(image_bytes, mime_type, source_type)
+        return await run_in_threadpool(
+            gemini_client.extract_grid_observation, image_bytes, mime_type, source_type
+        )
     except gemini_client.ExtractionFailed as exc:
         logger.warning("격자 관측 추출 실패, 폴백으로 대체: %s", exc)
         return build_fallback_grid_observation(source_type)
