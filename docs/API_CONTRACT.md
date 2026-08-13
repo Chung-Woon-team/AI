@@ -74,6 +74,27 @@ http://localhost:8080/v3/api-docs          (JSON)
 }
 ```
 
+### 선하증권
+
+| Method | Path | 용도 |
+|---|---|---|
+| `POST` | `/api/bill-of-ladings/extract` | 선하증권 이미지 업로드 → 저장 + 차량 전개 |
+
+스프링이 내부적으로 `POST /internal/extract/bl`(AI)을 호출해 `BillOfLadingExtraction`을 받고,
+`BillOfLading` 1행 + `Vehicle` N행으로 전개해 저장한다(VIN range 전개, SEQ 배분 — 결정론적 코드,
+AI 아님. docs/DOMAIN.md 4-1절).
+
+```jsonc
+// POST /api/bill-of-ladings/extract  (multipart/form-data, key="file")
+// → {
+//   "success": true,
+//   "data": { "bl_number": "NXR-USN-NTD-26081101", "vehicle_count": 60,
+//              "vehicle_ids": ["V-0001", "V-0002", "..."] }
+// }
+```
+
+AI 서비스가 죽어 있으면 `{"success": false, "error": {"code": "AI_UNAVAILABLE", ...}}`.
+
 ### 야드 상태 (최적화 입력)
 
 | Method | Path | 용도 |
@@ -85,11 +106,15 @@ http://localhost:8080/v3/api-docs          (JSON)
 // GET /api/yard/state
 {
   "plan_version": "B0",
-  "blocks": [{ "block_id": "B03", "lane_count": 10, "depth_per_lane": 8,
+  "grid":   { "size": 56, "road_width": 4, "block_size": 22 },
+  "blocks": [{ "block_id": "B03", "zone_code": "QC-HOLD",
+               "origin_row": 30, "origin_col": 4, "grid_size": 22,
+               "lane_count": 22, "depth_per_lane": 11,
                "closed": false, "closure_reason": null }],
-  "slots":  [{ "slot_id": "B03-L02-D04", "block_id": "B03",
-               "lane": 2, "depth": 4, "status": "OCCUPIED" }],
-  "placements": { "V-0001": "B03-L02-D04" }
+  "slots":  [{ "slot_id": "B03-R30-C04", "block_id": "B03",
+               "grid_row": 30, "grid_col": 4,
+               "lane": 0, "depth": 0, "access_side": "NORTH", "status": "OCCUPIED" }],
+  "placements": { "V-0001": "B03-R30-C04" }
 }
 ```
 
@@ -110,11 +135,11 @@ http://localhost:8080/v3/api-docs          (JSON)
   "plan_version": "B0-r1",
   "based_on_version": "B0",
   "triggered_by_instruction_id": "INS-001",
-  "placements": { "V-0182": "B05-L01-D00" },
+  "placements": { "V-0182": "B02-R04-C30" },
   "moves": [{
     "vehicle_id": "V-0182",
-    "from_slot": "B03-L02-D04",
-    "to_slot":   "B05-L01-D00",
+    "from_slot": "B03-R30-C04",
+    "to_slot":   "B02-R04-C30",
     "sequence": 1,
     "reason": "B03 폐쇄(C-001)",
     "distance_meters": 412.5      // ← 경로 알고리즘 산출
@@ -126,7 +151,7 @@ http://localhost:8080/v3/api-docs          (JSON)
   },
   "kpi_before": { "avg_move_distance": 812.0, "...": "..." },
   "consistency_issues": [
-    { "code": "OBSERVATION_MISMATCH", "slot_id": "B03-L05",
+    { "code": "OBSERVATION_MISMATCH", "slot_id": "B03-R30-C09",
       "message": "사진은 점유, 계획은 비어있음" }
   ]
 }
@@ -238,8 +263,9 @@ CSV 한 열(차량 1대)
    `avg_move_distance` KPI 를 만들 수 없다.** 장표 6쪽의 "평균 이동거리 812m → 502m" 가 이 상수에 걸려 있다.
 2. **`SECONDS_PER_STEP`** — 1 타임스텝의 실제 시간(초). 거리만 쓸 거면 없어도 되지만,
    "몇 분 걸리는 작업인가"를 보여주려면 필요.
-3. **좌표 ↔ 슬롯 매핑** — 50×50 격자의 `(row, col)` 이 `B03-L02-D04` 중 무엇인지.
-   장표의 10×10 격자 사진과도 축척이 안 맞아서, 격자가 하나인지 둘인지부터 정해야 한다.
+3. **경로 CSV 격자 정합** — 야드 격자는 도면대로 **56×56** 으로 확정됐고 `(row, col)` ↔ `slot_id`
+   변환은 `YardGrid.slotId` / `ids.make_slot_id` 로 끝났다. 남은 건 `df_schedule.csv` 의 50×50 좌표와
+   장표 사진의 10×10 격자를 56×56 으로 어떻게 옮기냐다.
 4. **차량 ID** — CSV 는 `Car 1`, 도메인 규칙은 `V-0001`. 컬럼명을 바꾸거나 어댑터에서
    `Car N → V-{N:04d}` 로 변환. **어느 쪽이든 한 곳에서만** 하기로 정할 것.
 
