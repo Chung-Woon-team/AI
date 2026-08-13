@@ -363,6 +363,21 @@ class GridObservation(BaseModel):
 # --------------------------------------------------------------------------
 
 
+class PathStep(BaseModel):
+    """야드 절대 좌표 한 칸 + 그 칸에 있는 시각. 프론트 애니메이션용.
+
+    DB 에 저장하지 않는다(docs/API_CONTRACT.md §4: "좌표열 자체 → 시각화용, DB 저장 안 함") —
+    500대 × 수백 스텝을 매 판마다 영구 저장하면 감당이 안 된다. 그래서 이 응답,
+    즉 재배치를 막 계산한 이 순간에만 존재한다.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    row: int
+    col: int
+    t: int
+
+
 class Move(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -372,6 +387,8 @@ class Move(BaseModel):
     sequence: int
     reason: str
     distance_meters: float
+    # 진입도로 ↔ 진입도로 구간만 담는다(슬롯 자체는 경로 탐색 그래프에 없음, mapf.py 참고).
+    path: list[PathStep] = Field(default_factory=list)
 
 
 class PlanKpi(BaseModel):

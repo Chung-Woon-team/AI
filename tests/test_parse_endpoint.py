@@ -21,6 +21,8 @@ def _settings(*, gemini_api_key: str | None) -> Settings:
         gemini_model="gemini-2.5-flash",
         backend_base_url="http://localhost:8080",
         confidence_threshold=0.85,
+        meters_per_cell=3.0,
+        seconds_per_step=1.0,
     )
 
 

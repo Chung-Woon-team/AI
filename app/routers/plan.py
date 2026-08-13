@@ -10,6 +10,7 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
+from autoyard import replan as replan_engine
 from autoyard.schemas import ParsedConstraint, PlanKpi, ReplanResult
 
 router = APIRouter(prefix="/internal", tags=["plan"])
@@ -40,7 +41,20 @@ class BriefResponse(BaseModel):
 
 @router.post("/replan", response_model=ReplanResult)
 def replan(req: ReplanRequest) -> ReplanResult:
-    raise HTTPException(status_code=501, detail="아직 구현 전 (알고리즘 파트)")
+    """mapf.ipynb 기반 시공간 A* 로 배치를 계산한다. 결정론적 코드 — AI 아님."""
+    not_approved = [c.constraint_id for c in req.constraints if c.status != "APPROVED"]
+    if not_approved:
+        raise HTTPException(
+            status_code=422,
+            detail=f"PENDING_REVIEW/REJECTED 제약은 여기 오면 안 됩니다: {not_approved}",
+        )
+
+    return replan_engine.compute_replan(
+        base_plan_version=req.base_plan_version,
+        constraints=req.constraints,
+        yard_state=req.yard_state,
+        vehicles=req.vehicles,
+    )
 
 
 @router.post("/brief", response_model=BriefResponse)
