@@ -31,7 +31,9 @@ packages = ["src/autoyard"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["src"]
+# "." 가 없으면 `app.main` 같은 프로젝트 루트 모듈을 테스트가 못 찾는다 - `uv run pytest`
+# 는 pytest 를 스크립트로 바로 실행해서 `python -m pytest` 와 달리 CWD 를 sys.path 에 안 넣는다.
+pythonpath = [".", "src"]
 
 [tool.ruff]
 line-length = 100
