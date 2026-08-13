@@ -9,8 +9,8 @@ from autoyard.schemas import ConstraintPriority, ConstraintType, ParsedConstrain
 
 def test_slot_id_round_trip():
     # 슬롯 ID 는 야드 절대 좌표를 품는다. 격자 규칙은 test_yard_grid.py 가 본다.
-    assert ids.make_slot_id(30, 4) == "B03-R30-C04"
-    assert ids.parse_slot_id("B03-R30-C04") == ("B03", 30, 4)
+    assert ids.make_slot_id(13, 4) == "B03-R13-C04"
+    assert ids.parse_slot_id("B03-R13-C04") == ("B03", 13, 4)
 
 
 def test_parses_the_example_from_the_doc():

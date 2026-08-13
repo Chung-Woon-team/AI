@@ -5,25 +5,29 @@
 
 ::
 
-    가로·세로 모두 4 + 22 + 4 + 22 + 4 = 56 칸
+    행: 4 +  5 + 4 +  5 + 4 = 22
+    열: 4 + 17 + 4 + 17 + 4 = 46
 
-    열 →   0    4              26   30              52   56
-    행 0  ┌────────────────────────────────────────────┐
-          │            외곽 도로 (폭 4)                 │
-       4  ├────┬──────────────┬────┬──────────────┬────┤
-          │도로│  B01 22×22   │통로│  B02 22×22   │도로│
-      26  ├────┼──────────────┼────┼──────────────┼────┤
-          │            십자 통로 (폭 4)                 │
-      30  ├────┼──────────────┼────┼──────────────┼────┤
-          │도로│  B03 22×22   │통로│  B04 22×22   │도로│
-      52  ├────┴──────────────┴────┴──────────────┴────┤
-          │            외곽 도로 (폭 4)                 │
-      56  └────────────────────────────────────────────┘
+    열 →  0    4              21   25              42  46
+    행 0 ┌───────────────────────────────────────────┐
+         │            외곽 도로 (폭 4)                │
+       4 ├────┬──────────────┬────┬──────────────┬───┤
+         │도로│  B01  5×17   │통로│  B02  5×17   │도로│
+       9 ├────┼──────────────┼────┼──────────────┼───┤
+         │            십자 통로 (폭 4)                │
+      13 ├────┼──────────────┼────┼──────────────┼───┤
+         │도로│  B03  5×17   │통로│  B04  5×17   │도로│
+      18 ├────┴──────────────┴────┴──────────────┴───┤
+         │            외곽 도로 (폭 4)                │
+      22 └───────────────────────────────────────────┘
 
-주차칸 22×22×4 = 1,936, 도로칸 56² − 1,936 = 1,200.
+주차칸 5×17×4 = 340, 도로칸 22×46 − 340 = 672.
 
-블록은 네 면이 모두 도로에 닿는다. 그래서 한 레인(세로 22칸)은 위·아래 양쪽에서 진입하고,
-depth 는 "가장 가까운 도로에서 몇 번째"(0~10)로 센다. 어느 쪽인지는 access_side 가 가린다.
+**정사각형이 아니다.** 블록이 가로로 길다(폭 17 × 깊이 5) — 차 한 대가 폭 2.5m · 길이 5m 라
+항공사진에서도 블록이 가로로 긴 직사각형으로 보인다. 그래서 행 수와 열 수를 따로 둔다.
+
+블록은 네 면이 모두 도로에 닿는다. 그래서 한 레인(세로 5칸)은 위·아래 양쪽에서 진입하고,
+depth 는 "가장 가까운 도로에서 몇 번째"(0~2)로 센다. 어느 쪽인지는 access_side 가 가린다.
 """
 
 from __future__ import annotations
@@ -31,20 +35,25 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Iterator, Literal
 
-SIZE = 56
 ROAD_WIDTH = 4
-BLOCK_SIZE = 22
+BLOCK_ROWS = 5
+BLOCK_COLS = 17
 BLOCK_COUNT = 4
 
+ROW_COUNT = ROAD_WIDTH * 3 + BLOCK_ROWS * 2
+COL_COUNT = ROAD_WIDTH * 3 + BLOCK_COLS * 2
+
 FIRST_BLOCK_ORIGIN = ROAD_WIDTH
-SECOND_BLOCK_ORIGIN = ROAD_WIDTH + BLOCK_SIZE + ROAD_WIDTH
+SECOND_BLOCK_ORIGIN_ROW = ROAD_WIDTH + BLOCK_ROWS + ROAD_WIDTH
+SECOND_BLOCK_ORIGIN_COL = ROAD_WIDTH + BLOCK_COLS + ROAD_WIDTH
 
-LANES_PER_BLOCK = BLOCK_SIZE
-DEPTH_PER_LANE = BLOCK_SIZE // 2
+LANES_PER_BLOCK = BLOCK_COLS
+# 5칸을 위 3 / 아래 2 로 가른다(홀수라 위쪽이 한 칸 더 깊다).
+DEPTH_PER_LANE = (BLOCK_ROWS + 1) // 2
 
-SLOTS_PER_BLOCK = BLOCK_SIZE * BLOCK_SIZE
+SLOTS_PER_BLOCK = BLOCK_ROWS * BLOCK_COLS
 SLOT_COUNT = BLOCK_COUNT * SLOTS_PER_BLOCK
-ROAD_CELL_COUNT = SIZE * SIZE - SLOT_COUNT
+ROAD_CELL_COUNT = ROW_COUNT * COL_COUNT - SLOT_COUNT
 
 AccessSide = Literal["NORTH", "SOUTH"]
 
@@ -63,11 +72,11 @@ class BlockLayout:
 
     @property
     def last_row(self) -> int:
-        return self.origin_row + BLOCK_SIZE - 1
+        return self.origin_row + BLOCK_ROWS - 1
 
     @property
     def last_col(self) -> int:
-        return self.origin_col + BLOCK_SIZE - 1
+        return self.origin_col + BLOCK_COLS - 1
 
     def contains(self, row: int, col: int) -> bool:
         return (
@@ -76,7 +85,7 @@ class BlockLayout:
         )
 
     def lane(self, col: int) -> int:
-        """레인 = 블록 안의 세로 열. 0 ~ 21."""
+        """레인 = 블록 안의 세로 열. 0 ~ 16."""
         self._require_col(col)
         return col - self.origin_col
 
@@ -85,10 +94,10 @@ class BlockLayout:
         return "NORTH" if (row - self.origin_row) < DEPTH_PER_LANE else "SOUTH"
 
     def depth(self, row: int) -> int:
-        """진입 도로에서 몇 번째 자리인지. 0 ~ 10, 0 이 도로에 바로 붙은 칸."""
+        """진입 도로에서 몇 번째 자리인지. 0 ~ 2, 0 이 도로에 바로 붙은 칸."""
         self._require_row(row)
         offset = row - self.origin_row
-        return offset if offset < DEPTH_PER_LANE else BLOCK_SIZE - 1 - offset
+        return offset if offset < DEPTH_PER_LANE else BLOCK_ROWS - 1 - offset
 
     def access_road_cell(self, row: int, col: int) -> Cell:
         """그 자리로 드나드는 도로 칸. 경로 알고리즘의 출발·도착점."""
@@ -113,9 +122,9 @@ class BlockLayout:
 # zone_code 는 아직 팀에서 확정하지 않은 임시값이다. 스프링 BlockLayout 과 같은 순서·같은 값.
 BLOCKS: tuple[BlockLayout, ...] = (
     BlockLayout("B01", "EV-A", FIRST_BLOCK_ORIGIN, FIRST_BLOCK_ORIGIN),
-    BlockLayout("B02", "GEN-B", FIRST_BLOCK_ORIGIN, SECOND_BLOCK_ORIGIN),
-    BlockLayout("B03", "QC-HOLD", SECOND_BLOCK_ORIGIN, FIRST_BLOCK_ORIGIN),
-    BlockLayout("B04", "HVY-D", SECOND_BLOCK_ORIGIN, SECOND_BLOCK_ORIGIN),
+    BlockLayout("B02", "GEN-B", FIRST_BLOCK_ORIGIN, SECOND_BLOCK_ORIGIN_COL),
+    BlockLayout("B03", "QC-HOLD", SECOND_BLOCK_ORIGIN_ROW, FIRST_BLOCK_ORIGIN),
+    BlockLayout("B04", "HVY-D", SECOND_BLOCK_ORIGIN_ROW, SECOND_BLOCK_ORIGIN_COL),
 )
 
 
@@ -127,7 +136,7 @@ def block_of(block_id: str) -> BlockLayout:
 
 
 def is_inside(row: int, col: int) -> bool:
-    return 0 <= row < SIZE and 0 <= col < SIZE
+    return 0 <= row < ROW_COUNT and 0 <= col < COL_COUNT
 
 
 def block_at(row: int, col: int) -> BlockLayout | None:
@@ -153,8 +162,8 @@ def road_cells() -> list[Cell]:
     """경로 알고리즘이 그래프로 쓸 도로 칸 전부."""
     return [
         (row, col)
-        for row in range(SIZE)
-        for col in range(SIZE)
+        for row in range(ROW_COUNT)
+        for col in range(COL_COUNT)
         if is_road(row, col)
     ]
 
