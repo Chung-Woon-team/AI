@@ -32,10 +32,11 @@ from datetime import datetime
 
 from google import genai
 from google.genai import types
-from pydantic import ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
+from autoyard import yard_grid
 from autoyard.config import settings
-from autoyard.schemas import BillOfLadingExtraction, ParseResult
+from autoyard.schemas import BillOfLadingExtraction, GridCell, GridObservation, ObservationSource, ParseResult
 
 logger = logging.getLogger(__name__)
 
@@ -347,3 +348,110 @@ def extract_bill_of_lading(image_bytes: bytes, mime_type: str) -> BillOfLadingEx
             raise ExtractionFailed(
                 f"스키마 검증이 repair 재시도까지 실패했습니다: {second_error}"
             ) from second_error
+
+
+# --------------------------------------------------------------------------
+# ③ 야드 격자 관측 (사진 → 슬롯별 점유 여부)
+# --------------------------------------------------------------------------
+
+
+class _GridRecognition(BaseModel):
+    """Gemini 가 이미지에서 직접 알 수 있는 것만. source_type/captured_at 은 업로드 맥락이지
+    사진 내용이 아니라서 여기 안 넣는다 - 호출부(라우터)가 채운다.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    grid: list[GridCell]
+    confidence: float = Field(ge=0.0, le=1.0)
+    requires_confirmation: bool = False
+
+    @model_validator(mode="after")
+    def _cells_are_valid_slots(self) -> _GridRecognition:
+        for cell in self.grid:
+            if not yard_grid.is_slot(cell.row, cell.col):
+                raise ValueError(
+                    f"({cell.row}, {cell.col}) 은(는) 주차칸이 아닙니다(도로 칸이거나 격자 밖)"
+                )
+        seen = {(c.row, c.col) for c in self.grid}
+        if len(seen) != len(self.grid):
+            raise ValueError("같은 (row, col) 이 두 번 나왔습니다")
+        return self
+
+
+_GRID_PROMPT = """\
+너는 완성차 야드(주차장) 항공사진 한 장을 보고 주차칸마다 비었는지 찼는지 판정하는 인식기다.
+
+야드는 고정된 격자다. 전체 22행 × 46열이고, 주차칸은 아래 네 블록 안에만 있다(그 외는 전부 도로다):
+- B01: 행 4~8, 열 4~20
+- B02: 행 4~8, 열 25~41
+- B03: 행 13~17, 열 4~20
+- B04: 행 13~17, 열 25~41
+
+절대 규칙:
+1. 위 네 블록 안의 주차칸 340개(블록당 5행 × 17열) 전부를 하나씩 판정해서 빠짐없이 담아라.
+2. 블록 범위 밖(도로 칸)은 절대 결과에 넣지 마라.
+3. 사진이 흐리거나 각도가 애매해 확신이 안 서는 칸이 있어도 가장 그럴듯한 값으로 채우되,
+   confidence 를 낮추고(0.7 이하 권장) requires_confirmation 을 true 로 켜라.
+4. confidence 는 이 사진 전체를 얼마나 확신 있게 읽었는지 0.0~1.0.
+
+아래 JSON 형식으로만 응답하라. 다른 텍스트를 덧붙이지 마라. 여기 없는 키를 추가하지 마라.
+
+{
+  "grid": [
+    {"row": 4, "col": 4, "occupied": true}
+  ],
+  "confidence": 0.9,
+  "requires_confirmation": false
+}
+"""
+
+_REPAIR_PROMPT_TEMPLATE_GRID = """\
+{original}
+
+방금 네가 낸 답이 스키마 검증에 실패했다.
+
+네 응답:
+{previous}
+
+에러:
+{error}
+
+같은 사진을 다시 보고, 위 에러만 고쳐서 다시 답하라. 에러와 무관한 칸은 그대로 두고,
+이번에도 블록 범위 밖의 칸은 넣지 마라.
+"""
+
+
+def extract_grid_observation(
+    image_bytes: bytes, mime_type: str, source_type: ObservationSource
+) -> GridObservation:
+    """야드 전체 사진 한 장 → GridObservation.
+
+    호출부는 `settings.gemini_enabled` 를 먼저 확인해야 한다 — 이 함수는 키가 있다고 가정한다.
+    """
+    client = _client()
+
+    raw = _call_with_retry_image(client, image_bytes, mime_type, _GRID_PROMPT)
+
+    try:
+        recognition = _GridRecognition.model_validate_json(raw)
+    except ValidationError as first_error:
+        logger.warning("격자 인식 결과가 스키마 검증 실패, repair 재시도: %s", first_error)
+        repair_prompt = _REPAIR_PROMPT_TEMPLATE_GRID.format(
+            original=_GRID_PROMPT, previous=raw, error=first_error
+        )
+        raw2 = _call_with_retry_image(client, image_bytes, mime_type, repair_prompt)
+        try:
+            recognition = _GridRecognition.model_validate_json(raw2)
+        except ValidationError as second_error:
+            raise ExtractionFailed(
+                f"스키마 검증이 repair 재시도까지 실패했습니다: {second_error}"
+            ) from second_error
+
+    return GridObservation(
+        source_type=source_type,
+        captured_at=datetime.now(),
+        grid=recognition.grid,
+        confidence=recognition.confidence,
+        requires_confirmation=recognition.requires_confirmation,
+    )

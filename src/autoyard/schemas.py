@@ -13,7 +13,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from autoyard import ids
+from autoyard import ids, yard_grid
 
 
 class ConstraintType(str, Enum):
@@ -334,21 +334,24 @@ class GridCell(BaseModel):
 
 
 class GridObservation(BaseModel):
+    """야드 전체 사진 한 장의 인식 결과. block_id 는 없다 — 절대좌표라 칸마다 블록이 유도된다
+    ({@code yard_grid.block_at}), 사진 자체가 블록 하나가 아니라 야드 전체를 담기 때문이다.
+    """
+
     model_config = ConfigDict(extra="forbid")
 
     source_type: ObservationSource
     captured_at: datetime
-    block_id: str
     grid: list[GridCell]
     confidence: float = Field(ge=0.0, le=1.0)
     requires_confirmation: bool = False
 
-    @field_validator("block_id")
-    @classmethod
-    def _id_format(cls, v: str) -> str:
-        if not ids.is_valid("block", v):
-            raise ValueError(f"블록 ID 형식이 아닙니다: {v!r} (예: B03)")
-        return v
+    @model_validator(mode="after")
+    def _cells_are_valid_slots(self) -> GridObservation:
+        for cell in self.grid:
+            if not yard_grid.is_slot(cell.row, cell.col):
+                raise ValueError(f"({cell.row}, {cell.col}) 은(는) 주차칸이 아닙니다(도로 칸이거나 격자 밖)")
+        return self
 
     @model_validator(mode="after")
     def _no_duplicate_cells(self) -> GridObservation:
