@@ -10,8 +10,8 @@ from autoyard.schemas import ParsedConstraint
 
 B01_SLOT_A = ids.make_slot_id(4, 4)  # depth 0 - 도로에 바로 붙음
 B01_SLOT_B = ids.make_slot_id(4, 5)  # depth 0
-B01_SLOT_DEEP = ids.make_slot_id(15, 4)  # depth 10 - 가장 깊음
-B03_SLOT_A = ids.make_slot_id(30, 4)  # 다른 블록
+B01_SLOT_DEEP = ids.make_slot_id(6, 4)  # depth 2 - 가장 깊음 (5칸 레인의 한가운데)
+B03_SLOT_A = ids.make_slot_id(13, 4)  # 다른 블록
 
 
 def _slot(slot_id: str, status: str = "EMPTY") -> dict:
