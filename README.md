@@ -17,6 +17,14 @@ Chung-Woon/
 └── .run/             IntelliJ 공용 실행 설정
 ```
 
+**저장소는 파트별로 셋이다.** 각 폴더가 각 저장소의 루트고, `docs/` 는 세 곳에 같이 들어간다.
+
+| 폴더 | 저장소 |
+|---|---|
+| `backend/` | https://github.com/Chung-Woon-team/Back-End |
+| `ai/` | https://github.com/Chung-Woon-team/AI |
+| `frontend/` | https://github.com/Chung-Woon-team/Front-end |
+
 ```
 React ──REST──▶ Spring (:8080) ──내부 호출──▶ Python FastAPI (:8000)
                      │
@@ -26,6 +34,24 @@ React ──REST──▶ Spring (:8080) ──내부 호출──▶ Python Fas
 
 **스프링이 유일한 공개 API 창구다.** 프론트는 스프링만 알면 되고, 파이썬은 스프링만 부른다.
 API 목록은 서버를 띄우고 http://localhost:8080/swagger-ui/index.html 에서 볼 수 있다.
+
+## 야드 격자
+
+도면대로 **56 × 56** (4 + 22 + 4 + 22 + 4). 22×22 블록 4개, 주차칸 1,936 · 도로칸 1,200.
+자세한 규칙은 [docs/DOMAIN.md](docs/DOMAIN.md) 의 "야드 격자" 절에 있다.
+
+## 작업 방식
+
+**브랜치를 파서 PR 로 올리고, 다른 사람이 리뷰·머지한다.** `main` 에 직접 푸시하지 않는다. 이슈는 쓰지 않는다.
+
+```bash
+git switch -c feat/무엇을-하는지
+# 작업
+git push -u origin feat/무엇을-하는지
+gh pr create --fill        # 또는 GitHub 웹에서
+```
+
+브랜치 이름은 `feat/` · `fix/` · `docs/` · `chore/` 중 하나로 시작한다.
 
 ## 문서
 
