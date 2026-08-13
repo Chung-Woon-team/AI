@@ -128,7 +128,7 @@ uv run streamlit run tools/streamlit_app.py
 ```
 ai/
 ├── src/autoyard/
-│   ├── ids.py        ✅ ID 규칙 정규식 (V-0001, B03, B03-L02-D04, C-001, INS-001)
+│   ├── ids.py        ✅ ID 규칙 정규식 (V-0001, B03, B01-R04-C07, C-001, INS-001)
 │   ├── schemas.py    ✅ Pydantic 스키마 전부
 │   ├── config.py     ✅ .env 로딩, 키 없으면 gemini_enabled=False
 │   └── (없음)        ❌ gemini 클라이언트, 프롬프트, 그래프, 최적화
@@ -322,8 +322,9 @@ State 필드: `instruction_text`, `constraint_set`, `clarification`, `validation
 
 이건 우리가 정해서 알려줘야 하는 것들이다. 혼자 추측해서 만들다 버리는 일 없게, 막히면 물어보면 된다.
 
-1. **좌표 ↔ 슬롯 매핑** — ③ 의 출력은 `(row, col)` 인데 도메인은 `B03-L02-D04` 다. 변환 규칙이 아직 없다.
-   경로 알고리즘 CSV 는 50×50 인데 장표 사진은 10×10 이라 축척도 안 맞아서 정리 중이다
+1. **경로 CSV 격자 정합** — 야드 격자는 도면대로 **56×56** 으로 확정됐다. `(row, col)` ↔ `slot_id` 변환은
+   `autoyard/yard_grid.py` 와 `ids.make_slot_id` 로 끝났다(예: `(4, 7)` → `B01-R04-C07`).
+   남은 건 경로 알고리즘 CSV 의 50×50 좌표와 장표 사진의 10×10 격자를 56×56 으로 어떻게 옮기냐다
 2. **추출 항목이 확정이 아니다** — 알고리즘에 넣을 값이 정해지면 ② 의 필드가 바뀔 수 있다
 3. **`next_mode` / `departure_cutoff_at` / `priority`** — 선하증권에 없는 값이다.
    어디서 채울지 미정 (합성 생성 / 별도 CSV / UI 입력)
