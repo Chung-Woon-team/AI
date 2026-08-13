@@ -75,6 +75,7 @@ def compute_replan(
     placements_before: dict[str, str] = dict(yard_state.get("placements") or {})
 
     closed_blocks = _closed_blocks(blocks, constraints)
+    occupied_cells = _occupied_slot_cells(slots, placements_before)
     empty_slots_by_block = _empty_slots_by_block(slots, placements_before)
     grouping_constraints = [c for c in constraints if c.type == ConstraintType.VEHICLE_GROUPING]
     outbound_constraints = [c for c in constraints if c.type == ConstraintType.OUTBOUND_PRIORITY]
@@ -122,11 +123,12 @@ def compute_replan(
                 target_exit=TRAIN_EXIT if vs.next_mode == "RAIL" else TRUCK_EXIT,
                 prefer_block=prefer_block,
                 group_size=min(CONVOY_SIZE, _remaining_convoy_size(order, vs, convoy_key, grouping_constraints)),
+                occupied_cells=occupied_cells,
             )
             convoy_slots[convoy_key] = queued_slots
             if queued_slots:
                 queued_paths = _build_convoy_paths(
-                    queued_slots, reservation, start_time, vs.vehicle_id
+                    queued_slots, reservation, start_time, vs.vehicle_id, occupied_cells
                 )
                 convoy_paths[convoy_key] = queued_paths
                 # 이 군집의 경로는 지금 모두 확정됐다. 다음 군집은 80스텝 뒤에 연다.
@@ -135,11 +137,12 @@ def compute_replan(
         chosen_slot = queued_slots.pop(0) if queued_slots else None
         path: list[mapf.TimedCell] = queued_paths.pop(0) if queued_paths else []
         if chosen_slot is not None and not path:
-            path = _path_to_slot(vs, chosen_slot, reservation, start_time)
+            path = _path_to_slot(vs, chosen_slot, reservation, start_time, occupied_cells)
         if chosen_slot is None or not path:
             chosen_slot, path = _assign_slot(
                 vs, closed_blocks, empty_slots_by_block, reservation,
                 start_time=start_time, prefer_block=prefer_block, prefer_shallow=prefer_shallow,
+                occupied_cells=occupied_cells,
             )
 
         if chosen_slot is None:
@@ -151,6 +154,7 @@ def compute_replan(
 
         reservation.reserve_path(path, vs.vehicle_id)
         _mark_slot_taken(empty_slots_by_block, chosen_slot)
+        occupied_cells.add(ids.slot_cell(chosen_slot))
         placements[vs.vehicle_id] = chosen_slot
 
         if group_key and prefer_block is None:
@@ -207,6 +211,17 @@ def _empty_slots_by_block(slots: list[dict], placements_before: dict[str, str]) 
             {"slot_id": slot_id, "row": row, "col": col, "depth": block.depth(row)}
         )
     return by_block
+
+
+def _occupied_slot_cells(
+    slots: list[dict], placements_before: dict[str, str]
+) -> set[mapf.Cell]:
+    """DB 배치와 관측 점유 상태를 모두 정적 장애물로 만든다."""
+    occupied_ids = set(placements_before.values())
+    occupied_ids.update(
+        slot["slot_id"] for slot in slots if slot.get("status") == "OCCUPIED"
+    )
+    return {ids.slot_cell(slot_id) for slot_id in occupied_ids}
 
 
 def _to_vehicle_state(v: dict, placements_before: dict[str, str]) -> _VehicleState:
@@ -311,6 +326,7 @@ def _assign_slot(
     start_time: int,
     prefer_block: str | None,
     prefer_shallow: bool,
+    occupied_cells: set[mapf.Cell],
 ) -> tuple[str | None, list[mapf.TimedCell]]:
     candidate_blocks = sorted(empty_slots_by_block.keys() - closed_blocks)
     if prefer_block and prefer_block not in closed_blocks and empty_slots_by_block.get(prefer_block):
@@ -327,12 +343,14 @@ def _assign_slot(
         candidates.sort(key=lambda s: _manhattan((s["row"], s["col"]), origin_road))
 
     for slot in candidates[:MAX_SLOT_CANDIDATES]:
+        if not _entry_is_clear(slot["slot_id"], occupied_cells):
+            continue
         goal_road = yard_grid.block_at(slot["row"], slot["col"]).access_road_cell(slot["row"], slot["col"])
         try:
             path = mapf.space_time_astar(reservation, origin_road, goal_road, start_time, vs.vehicle_id)
         except mapf.PathNotFound:
             continue
-        return slot["slot_id"], _append_slot_entry(path, slot["slot_id"])
+        return slot["slot_id"], _append_slot_entry(path, slot["slot_id"], occupied_cells)
 
     return None, []
 
@@ -361,6 +379,7 @@ def _find_fifo_slot_group(
     target_exit: mapf.Cell,
     prefer_block: str | None,
     group_size: int,
+    occupied_cells: set[mapf.Cell],
 ) -> list[str]:
     """같은 행의 연속 슬롯을 찾아 출구에 가까운 차가 convoy 선두가 되게 정렬한다."""
     block_ids = sorted(empty_slots_by_block.keys() - closed_blocks)
@@ -379,6 +398,10 @@ def _find_fifo_slot_group(
                 if any(group[i + 1]["col"] != group[i]["col"] + 1 for i in range(len(group) - 1)):
                     continue
                 group.sort(key=lambda slot: _manhattan((slot["row"], slot["col"]), target_exit))
+                # 리더는 가장 뒤쪽 슬롯으로 들어간 뒤 줄을 따라 전진한다. 그 진입
+                # 통로 중 하나라도 기존 주차 차량이 막고 있으면 이 그룹은 사용하지 않는다.
+                if not _entry_is_clear(group[-1]["slot_id"], occupied_cells):
+                    continue
                 candidates.append((
                     _manhattan((group[0]["row"], group[0]["col"]), target_exit),
                     group,
@@ -395,7 +418,10 @@ def _path_to_slot(
     slot_id: str,
     reservation: mapf.ReservationTable,
     start_time: int,
+    occupied_cells: set[mapf.Cell],
 ) -> list[mapf.TimedCell]:
+    if not _entry_is_clear(slot_id, occupied_cells):
+        return []
     origin_road = _access_road(vs.current_slot) if vs.current_slot else RAMP
     row, col = ids.slot_cell(slot_id)
     goal_road = yard_grid.block_at(row, col).access_road_cell(row, col)
@@ -405,7 +431,7 @@ def _path_to_slot(
         )
     except mapf.PathNotFound:
         return []
-    return _append_slot_entry(road_path, slot_id)
+    return _append_slot_entry(road_path, slot_id, occupied_cells)
 
 
 def _build_convoy_paths(
@@ -413,6 +439,7 @@ def _build_convoy_paths(
     reservation: mapf.ReservationTable,
     start_time: int,
     leader_id: str,
+    occupied_cells: set[mapf.Cell],
 ) -> list[list[mapf.TimedCell]]:
     """노트북처럼 리더 경로 하나를 잘라 최대 5대의 꼬리물기 경로를 만든다.
 
@@ -431,7 +458,9 @@ def _build_convoy_paths(
     except mapf.PathNotFound:
         return []
 
-    leader_path = _append_slot_entry(leader_path, slot_ids[-1])
+    leader_path = _append_slot_entry(leader_path, slot_ids[-1], occupied_cells)
+    if not leader_path or leader_path[-1][:2] != (rear_row, rear_col):
+        return []
     row, col, time_step = leader_path[-1]
     for slot_id in reversed(slot_ids[:-1]):
         target_row, target_col = ids.slot_cell(slot_id)
@@ -448,10 +477,32 @@ def _build_convoy_paths(
     return paths
 
 
-def _append_slot_entry(path: list[mapf.TimedCell], slot_id: str) -> list[mapf.TimedCell]:
+def _entry_cells(slot_id: str) -> list[mapf.Cell]:
+    """슬롯의 진입도로 바로 다음 칸부터 목표 슬롯까지의 직선 동선."""
+    target_row, _ = ids.slot_cell(slot_id)
+    row, col = _access_road(slot_id)
+    step = 1 if target_row > row else -1
+    cells: list[mapf.Cell] = []
+    while row != target_row:
+        row += step
+        cells.append((row, col))
+    return cells
+
+
+def _entry_is_clear(slot_id: str, occupied_cells: set[mapf.Cell]) -> bool:
+    return all(cell not in occupied_cells for cell in _entry_cells(slot_id))
+
+
+def _append_slot_entry(
+    path: list[mapf.TimedCell],
+    slot_id: str,
+    occupied_cells: set[mapf.Cell],
+) -> list[mapf.TimedCell]:
     """진입도로에서 끝난 MAPF 경로를 실제 주차 슬롯까지 한 칸씩 연장한다."""
     if not path:
         return path
+    if not _entry_is_clear(slot_id, occupied_cells):
+        return []
     target_row, target_col = ids.slot_cell(slot_id)
     row, col, time_step = path[-1]
     if col != target_col:

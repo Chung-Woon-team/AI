@@ -184,3 +184,46 @@ def test_five_new_vehicles_get_contiguous_fifo_slots_and_staggered_paths():
     for move in moves:
         assert (move.path[-1].row, move.path[-1].col) == ids.slot_cell(move.to_slot)
         assert all(b.t == a.t + 1 for a, b in zip(move.path, move.path[1:]))
+
+
+def test_parked_vehicle_blocks_the_slot_entry_corridor():
+    """깊은 슬롯 앞에 주차된 차량이 있으면 그 차량을 관통해 배치하면 안 된다."""
+    blocking_slot = ids.make_slot_id(4, 4)
+    blocked_deep_slot = ids.make_slot_id(6, 4)
+    yard_state = _yard_state(
+        slots=[_slot(blocking_slot, "OCCUPIED"), _slot(blocked_deep_slot)],
+        placements={"V-9000": blocking_slot},
+    )
+    vehicles = [
+        {"vehicle_id": "V-9000", "status": "IN_YARD"},
+        {"vehicle_id": "V-0001", "status": "EXPECTED"},
+    ]
+
+    result = replan.compute_replan(None, [], yard_state, vehicles)
+
+    assert "V-0001" not in result.placements
+    assert result.unplaced == ["V-0001"]
+
+
+def test_path_uses_an_unblocked_lane_instead_of_crossing_a_parked_vehicle():
+    blocking_slot = ids.make_slot_id(4, 4)
+    blocked_deep_slot = ids.make_slot_id(6, 4)
+    clear_deep_slot = ids.make_slot_id(6, 5)
+    yard_state = _yard_state(
+        slots=[
+            _slot(blocking_slot, "OCCUPIED"),
+            _slot(blocked_deep_slot),
+            _slot(clear_deep_slot),
+        ],
+        placements={"V-9000": blocking_slot},
+    )
+    vehicles = [
+        {"vehicle_id": "V-9000", "status": "IN_YARD"},
+        {"vehicle_id": "V-0001", "status": "EXPECTED"},
+    ]
+
+    result = replan.compute_replan(None, [], yard_state, vehicles)
+
+    move = result.moves[0]
+    assert move.to_slot == clear_deep_slot
+    assert ids.slot_cell(blocking_slot) not in {(step.row, step.col) for step in move.path}
