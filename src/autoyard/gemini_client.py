@@ -34,9 +34,16 @@ from google import genai
 from google.genai import types
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
-from autoyard import yard_grid
+from autoyard import briefing, yard_grid
 from autoyard.config import settings
-from autoyard.schemas import BillOfLadingExtraction, GridCell, GridObservation, ObservationSource, ParseResult
+from autoyard.schemas import (
+    BillOfLadingExtraction,
+    GridCell,
+    GridObservation,
+    ObservationSource,
+    ParseResult,
+    PlanKpi,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -455,3 +462,137 @@ def extract_grid_observation(
         confidence=recognition.confidence,
         requires_confirmation=recognition.requires_confirmation,
     )
+
+
+# --------------------------------------------------------------------------
+# ④ 브리핑 (초안 → 숫자 없는 headline + note)
+# --------------------------------------------------------------------------
+
+
+class BriefingFailed(Exception):
+    """Gemini 호출 또는 숫자/ID 검증이 재시도까지 실패했을 때."""
+
+
+# 완성된 브리핑을 시키지 않는다. 숫자가 들어가는 줄은 briefing.py 가 이미 다 만들어 놨고,
+# 여기서는 숫자가 없는 두 조각만 받는다 — 환각이 끼어들 자리를 구조적으로 없앤 것이다.
+_BRIEF_PROMPT = """\
+너는 완성차 야드(주차장) 재배치 결과를 현장 담당자에게 설명하는 사람이다.
+
+아래는 시스템이 이미 계산해 둔 브리핑 초안이다. 이 초안의 숫자는 전부 검증된 값이다.
+
+--- 초안 시작 ---
+<<DRAFT>>
+--- 초안 끝 ---
+
+너는 두 조각만 쓴다.
+- headline: 초안의 1줄차를 더 자연스러운 한 문장으로 다듬은 것
+- note: 왜 이런 결과가 나왔는지 설명하는 부연
+
+절대 규칙:
+1. 초안의 숫자를 바꾸지 마라. 새 숫자를 만들지 마라. 계산하지 마라.
+2. headline 에는 초안 1줄차에 이미 나온 숫자와 ID 외의 어떤 수치도 쓰지 마라.
+3. note 는 **숫자를 하나도 쓰지 말고** 1~2문장으로 써라. 왜 이런 결과가 나왔는지 인과만
+   설명하라. 지표 이름은 말해도 되지만 값은 말하지 마라.
+4. 재취급 Proxy 는 슬롯 깊이로 추정한 값이지 실측 재취급 횟수가 아니다. "재취급이 N번
+   줄었다" 같은 단정 표현을 쓰지 마라. "재취급 부담이 줄었다" 정도로만 말하라.
+5. 초안에 없는 차량 ID·슬롯 ID·블록 ID 를 지어내지 마라.
+
+아래 JSON 형식으로만 응답하라. 다른 텍스트를 덧붙이지 마라. 여기 없는 키를 추가하지 마라.
+
+{
+  "headline": "B02 블록 폐쇄로 42대가 재배치되었습니다.",
+  "note": "폐쇄 구역에 있던 차량을 인접 블록의 얕은 자리로 옮기면서 평균 이동거리와 재취급 부담이 함께 줄었습니다."
+}
+"""
+
+_REPAIR_PROMPT_TEMPLATE_BRIEF = """\
+{original}
+
+방금 네가 낸 답이 검증에 실패했다.
+
+네 응답:
+{previous}
+
+에러:
+{error}
+
+같은 초안을 다시 보고, 위 에러만 고쳐서 다시 답하라. 초안에 없는 숫자나 ID 는 빼고,
+설명이 필요하면 숫자 없이 말로만 풀어라.
+"""
+
+
+def _call_text_for_brief(client: genai.Client, prompt: str) -> str:
+    """`_call_with_retry_text` 재사용. 다만 예외 타입은 브리핑용으로 바꿔서 올려보낸다 —
+    라우터가 `except gemini_client.BriefingFailed` 하나로 폴백 분기를 잡을 수 있게."""
+    try:
+        return _call_with_retry_text(client, prompt)
+    except ParsingFailed as exc:
+        raise BriefingFailed(str(exc)) from exc
+
+
+def _brief_text_field(data: dict, key: str) -> str:
+    """headline/note 를 문자열로 꺼낸다. 값이 문자열이 아니면 검증 실패로 본다.
+
+    `(data.get(key) or "").strip()` 로 두면 모델이 숫자나 리스트를 넣었을 때 AttributeError 가
+    올라가 repair/폴백 분기를 빠져나간다.
+    """
+    value = data.get(key)
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise ValueError(f"{key} 가 문자열이 아닙니다")  # noqa: TRY004
+    return value.strip()
+
+
+def _to_headline_note(
+    raw: str, kpi: PlanKpi, kpi_before: PlanKpi | None, moves: list[dict]
+) -> tuple[str, str | None]:
+    """Gemini 의 raw JSON → 검증된 (headline, note). 검증 실패는 ValueError."""
+    if not isinstance(raw, str):
+        # SDK 의 response.text 는 응답이 막혔을 때(safety block · MAX_TOKENS) None 이다.
+        # 그대로 json.loads 에 넣으면 TypeError 가 나서 호출부의 repair/폴백 분기를 빠져나가고
+        # /brief 가 500 을 낸다 — "어떤 경우에도 5xx 를 내지 않는다"(계약서 4.4) 위반.
+        raise ValueError("Gemini 응답이 비어 있습니다")  # noqa: TRY004
+    data = json.loads(raw)
+    if not isinstance(data, dict):
+        # TRY004(TypeError 를 쓰라)를 억제하는 이유: 여기서 TypeError 를 던지면 호출부의
+        # repair 재시도 분기(ValueError/ValidationError)를 그냥 빠져나간다. LLM 이 형식을
+        # 어긴 건 파이썬 타입 오류가 아니라 "검증 실패" 라서 다른 검증들과 같은 줄에 세운다.
+        raise ValueError("응답이 JSON 객체가 아닙니다")  # noqa: TRY004
+
+    headline = _brief_text_field(data, "headline")
+    note = _brief_text_field(data, "note") or None
+    if not headline:
+        raise ValueError("headline 이 비어 있습니다")
+
+    briefing._validate_llm_text(f"{headline}\n{note or ''}", kpi, kpi_before, moves)
+    return headline, note
+
+
+def generate_briefing(
+    draft: str, kpi: PlanKpi, kpi_before: PlanKpi | None, moves: list[dict]
+) -> tuple[str, str | None]:
+    """결정론적 초안 → (headline, note). 최종 문장 조립은 호출부가 briefing.assemble 로 한다.
+
+    호출부는 `settings.gemini_enabled` 를 먼저 확인해야 한다 — 이 함수는 키가 있다고 가정한다.
+    다른 기능과 마찬가지로 여기서 폴백하지 않는다. 실패하면 BriefingFailed 를 던진다.
+    """
+    client = _client()
+    prompt = _BRIEF_PROMPT.replace("<<DRAFT>>", draft)
+
+    raw = _call_text_for_brief(client, prompt)
+
+    try:
+        return _to_headline_note(raw, kpi, kpi_before, moves)
+    except (ValueError, ValidationError) as first_error:
+        logger.warning("브리핑 문장이 검증 실패, repair 재시도: %s", first_error)
+        repair_prompt = _REPAIR_PROMPT_TEMPLATE_BRIEF.format(
+            original=prompt, previous=raw, error=first_error
+        )
+        raw2 = _call_text_for_brief(client, repair_prompt)
+        try:
+            return _to_headline_note(raw2, kpi, kpi_before, moves)
+        except (ValueError, ValidationError) as second_error:
+            raise BriefingFailed(
+                f"숫자/ID 검증이 repair 재시도까지 실패했습니다: {second_error}"
+            ) from second_error

@@ -137,13 +137,19 @@ API 문서는 http://localhost:8000/docs . 살아있는지 확인은 `/health`.
 `.env.example` 를 `.env` 로 복사해서 쓴다. **`GEMINI_API_KEY` 가 없어도 폴백 경로로 동작**하도록
 설계했다 — 심사 중 네트워크나 API 장애로 데모가 멈추면 안 되기 때문.
 
-현재 들어있는 것은 초기세팅까지다:
+현재 구조는 이렇다:
 
 ```
 ai/
 ├── src/autoyard/        도메인 로직
 │   ├── ids.py           ID 규칙 정규식 (V-0001, B03, B03-L02-D04) — 스프링 PK 와 같은 규칙
 │   ├── schemas.py       Pydantic 스키마 — AI 출력의 통과 관문
+│   ├── yard_grid.py     야드 격자 상수 (블록 4개 × 85칸)
+│   ├── mapf.py          시공간 A* 경로 탐색
+│   ├── replan.py        재배치 계산 + KPI 산출 (결정론적 — AI 아님)
+│   ├── briefing.py      브리핑 문장 조립 (순수 함수 — 숫자가 든 줄은 전부 여기서 만든다)
+│   ├── gemini_client.py Gemini 호출 (파싱 / 선하증권 / 격자 인식 / 브리핑)
+│   ├── fallback.py      Gemini 를 못 쓸 때 돌려줄 값
 │   └── config.py        .env 로딩
 ├── app/                 FastAPI (스프링이 부르는 내부 API)
 │   ├── main.py          진입점, /health
@@ -155,9 +161,15 @@ ai/
 └── Dockerfile           Cloud Run 배포용 (uvicorn)
 ```
 
-라우터는 **경로와 요청/응답 모양만 잡힌 스텁**이라 지금은 `501` 을 돌려준다.
-백엔드 담당이 연동 코드를 먼저 붙일 수 있게 껍데기부터 만들어 둔 것이다.
-LangGraph 그래프(7노드), Gemini 클라이언트, 최적화, 경로 어댑터는 아직 없다.
+구현된 것: `/internal/parse`, `/internal/extract/bl`, `/internal/extract/grid`,
+`/internal/replan`, `/internal/brief`. 아직 `501` 스텁인 것은 `/internal/resume` 하나뿐이다
+(LangGraph 체크포인터가 없어서 되돌아갈 대기 상태가 없다).
+
+`/internal/brief` 는 **숫자를 만들지 않는다.** 요청으로 받은 KPI 6개 수치로 파이썬이 불릿
+6줄을 조립하고(`briefing.build_briefing_draft`), Gemini 에게는 숫자가 없는 첫 문장(headline)과
+부연 한 줄(note)만 시킨다. 그래서 LLM 이 수치를 지어낼 경로 자체가 없다. 키가 없거나 호출이
+실패하면 초안을 그대로 돌려주고 `source="FALLBACK"` 으로 표시한다 — 어떤 경우에도 5xx 를 내지
+않는다.
 
 ## 팀 규칙
 

@@ -3,6 +3,12 @@
 데모 중 GEMINI_API_KEY 부재 · 네트워크 장애 · 반복된 검증 실패로 화면이 멈추면 안 된다
 (README / docs/HANDOFF_AI.md 7번 폴백). confidence=0.0 으로 박아서 "실제 결과가 아니라
 폴백"임을 신호로 남긴다 — 두 스키마 다 이게 유일하게 "확인 필요"를 표현할 수 있는 값이다.
+
+브리핑 폴백(`build_fallback_brief`)만 모양이 다르다. `BriefResponse` 에는 confidence 가 없어서
+`source="FALLBACK"` 이 그 신호 역할을 하고, 반환 타입도 `BriefResponse` 가 아니라 dict 다.
+`BriefResponse` 는 라우터(app/routers/plan.py)에 선언돼 있는데, 도메인 패키지인 autoyard 가
+app 을 import 하면 의존 방향이 뒤집히고(app → autoyard 가 정방향) 순환 import 가 된다.
+그래서 여기서는 dict 만 만들고 라우터가 `BriefResponse(**...)` 로 감싼다.
 """
 
 from __future__ import annotations
@@ -57,6 +63,22 @@ def build_fallback_parse_result(instruction_id: str) -> ParseResult:
         unresolved=["폴백 - 실제 파싱 아님"],
         requires_confirmation=True,
     )
+
+
+def build_fallback_brief(draft: str, consistency_issues: list[dict]) -> dict:
+    """Gemini 없이 만든 브리핑. 결정론적 초안(숫자 불릿)을 **그대로** 쓴다.
+
+    AI 경로와 다른 점은 마지막 부연 문단(note)이 빠지는 것뿐이다. 숫자 줄은 어차피
+    파이썬이 조립하므로 AI 경로와 바이트 단위로 같다 — 폴백이라고 숫자가 달라지지 않는다.
+
+    confirmations 는 요청의 consistency_issues 를 **그대로 에코**한다. 판정·정규화·추가를
+    하지 않는다 — 이 목록의 정본은 스프링이고, 여기서 손대면 두 벌이 생긴다.
+    """
+    return {
+        "briefing": draft,
+        "confirmations": consistency_issues,
+        "source": "FALLBACK",
+    }
 
 
 def build_fallback_grid_observation(source_type: ObservationSource) -> GridObservation:
