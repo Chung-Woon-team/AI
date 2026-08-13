@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi import APIRouter, File, UploadFile
 
 from autoyard import gemini_client
 from autoyard.config import settings
-from autoyard.fallback import FALLBACK_BILL_OF_LADING
-from autoyard.schemas import BillOfLadingExtraction, GridObservation
+from autoyard.fallback import FALLBACK_BILL_OF_LADING, build_fallback_grid_observation
+from autoyard.schemas import BillOfLadingExtraction, GridObservation, ObservationSource
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +38,25 @@ async def extract_bill_of_lading(file: UploadFile = File(...)) -> BillOfLadingEx
 
 
 @router.post("/grid", response_model=GridObservation)
-async def extract_grid(block_id: str, file: UploadFile = File(...)) -> GridObservation:
-    """주차장 사진 → 격자 점유 상태. 좌표(row, col)까지만 반환한다."""
-    raise HTTPException(status_code=501, detail="아직 구현 전 (AI 파트)")
+async def extract_grid(
+    source_type: ObservationSource = ObservationSource.MANUAL,
+    file: UploadFile = File(...),
+) -> GridObservation:
+    """야드 전체 사진 한 장 → 격자 점유 상태. 좌표(row, col)까지만 반환한다.
+
+    블록 하나가 아니라 야드 전체를 담은 사진 한 장을 받는다 — block_id 를 안 받는 이유는
+    GridObservation 문서 참고. 어느 블록이 닫혔는지·배치가 맞는지는 여기서 안 따진다,
+    스프링이 지금 DB 상태와 대조해서 판단한다.
+    """
+    if not settings.gemini_enabled:
+        logger.info("GEMINI_API_KEY 없음 - 폴백 격자 관측 반환")
+        return build_fallback_grid_observation(source_type)
+
+    image_bytes = await file.read()
+    mime_type = file.content_type or "image/jpeg"
+
+    try:
+        return gemini_client.extract_grid_observation(image_bytes, mime_type, source_type)
+    except gemini_client.ExtractionFailed as exc:
+        logger.warning("격자 관측 추출 실패, 폴백으로 대체: %s", exc)
+        return build_fallback_grid_observation(source_type)

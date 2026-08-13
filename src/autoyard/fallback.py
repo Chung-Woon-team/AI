@@ -7,7 +7,10 @@
 
 from __future__ import annotations
 
-from autoyard.schemas import BillOfLadingExtraction, ParseResult
+from datetime import datetime
+
+from autoyard import yard_grid
+from autoyard.schemas import BillOfLadingExtraction, GridCell, GridObservation, ObservationSource, ParseResult
 
 # 값은 docs/DOMAIN.md, docs/HANDOFF_AI.md 에 실린 DOC 01 샘플(60대, 대수 교차검증 통과)과 같다.
 FALLBACK_BILL_OF_LADING = BillOfLadingExtraction(
@@ -52,5 +55,18 @@ def build_fallback_parse_result(instruction_id: str) -> ParseResult:
             },
         ],
         unresolved=["폴백 - 실제 파싱 아님"],
+        requires_confirmation=True,
+    )
+
+
+def build_fallback_grid_observation(source_type: ObservationSource) -> GridObservation:
+    """격자 전부를 EMPTY 로 채워서 돌려준다. confidence=0.0 이라 호출부가 이대로 확정하면 안 되고,
+    사람이 다시 찍거나 수기로 확인하게 유도해야 한다 — 선하증권 폴백과 같은 신호 규칙.
+    """
+    return GridObservation(
+        source_type=source_type,
+        captured_at=datetime.now(),
+        grid=[GridCell(row=row, col=col, occupied=False) for row, col in yard_grid.slot_cells()],
+        confidence=0.0,
         requires_confirmation=True,
     )

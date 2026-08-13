@@ -4,7 +4,14 @@ import pytest
 from pydantic import ValidationError
 
 from autoyard import ids
-from autoyard.schemas import ConstraintPriority, ConstraintType, ParsedConstraint, ParseResult
+from autoyard.schemas import (
+    ConstraintPriority,
+    ConstraintType,
+    GridObservation,
+    ObservationSource,
+    ParsedConstraint,
+    ParseResult,
+)
 
 
 def test_slot_id_round_trip():
@@ -41,3 +48,24 @@ def test_hallucinated_id_is_rejected():
 def test_unresolved_forces_confirmation():
     r = ParseResult(instruction_id="INS-001", unresolved=["가까이"], requires_confirmation=False)
     assert r.requires_confirmation is True
+
+
+def test_grid_observation_has_no_block_id_field():
+    """야드 전체 사진 한 장이라 block_id 가 없다 - 칸마다 블록은 좌표로 유도된다."""
+    obs = GridObservation(
+        source_type=ObservationSource.DRONE,
+        captured_at="2026-08-13T14:00:00",
+        grid=[{"row": 4, "col": 4, "occupied": True}],
+        confidence=0.9,
+    )
+    assert not hasattr(obs, "block_id")
+
+
+def test_grid_observation_rejects_road_cell():
+    with pytest.raises(ValidationError):
+        GridObservation(
+            source_type=ObservationSource.DRONE,
+            captured_at="2026-08-13T14:00:00",
+            grid=[{"row": 0, "col": 0, "occupied": True}],
+            confidence=0.9,
+        )
