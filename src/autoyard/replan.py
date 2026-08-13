@@ -37,13 +37,19 @@ from autoyard.schemas import ConstraintType, Move, ParsedConstraint, PathStep, P
 RAMP: mapf.Cell = (0, 0)
 """차량이 처음 들어오는 지점(입구). mapf.ipynb 원본과 같다."""
 
-TRUCK_EXIT: mapf.Cell = (55, 0)
-TRAIN_EXIT: mapf.Cell = (55, 55)
+# 노트북 좌표는 (x, y), 서비스 좌표는 (row, col)이다. 현재 22x46 도면의 실제
+# 우상단/우하단 경계로 변환하지 않고 (55, 0)/(55, 55)를 그대로 쓰면 출구 방향이 뒤집힌다.
+TRUCK_EXIT: mapf.Cell = (0, yard_grid.COL_COUNT - 1)
+TRAIN_EXIT: mapf.Cell = (yard_grid.ROW_COUNT - 1, yard_grid.COL_COUNT - 1)
 
 MAX_SLOT_CANDIDATES = 25
 """슬롯 후보를 이 개수까지만 시도한다 — 500대 2초 목표(API_CONTRACT.md)를 지키기 위한 상한."""
 
 _CUTOFF_DATE_KEY = "cutoff_date"
+CONVOY_SIZE = 5
+"""mapf.ipynb 와 같은 한 입차 군집의 최대 차량 수."""
+CONVOY_BUFFER = 80
+"""mapf.ipynb 의 군집 간 톨게이트 간격(시간 스텝)."""
 
 
 @dataclass
@@ -87,6 +93,8 @@ def compute_replan(
     moves: list[Move] = []
     unplaced: list[str] = []
     group_block: dict[str, str] = {}
+    convoy_slots: dict[tuple[str | None, str], list[str]] = {}
+    convoy_paths: dict[tuple[str | None, str], list[list[mapf.TimedCell]]] = {}
     sequence = 1
     # 같은 지점(대개 RAMP)에서 동시에 출발하면 t=1 상태 수가 이웃 칸 수로 제한돼 있어서
     # 금방 자물쇠가 걸린다(예: 모서리 RAMP 는 이웃이 2칸 + 제자리 대기 1칸 = 3칸뿐이라
@@ -102,16 +110,44 @@ def compute_replan(
         origin_road = _access_road(vs.current_slot) if vs.current_slot else RAMP
         start_time = next_departure_time.get(origin_road, 0)
 
-        chosen_slot, path = _assign_slot(
-            vs, closed_blocks, empty_slots_by_block, reservation,
-            start_time=start_time, prefer_block=prefer_block, prefer_shallow=prefer_shallow,
-        )
+        # 신규 입차 차량은 같은 출차 모드/명시 그룹끼리 최대 5대 연속 슬롯을 미리 잡는다.
+        # 폐쇄 블록 재배치는 출발점이 서로 다르므로 기존 개별 MAPF를 유지한다.
+        convoy_key = (group_key, vs.next_mode or "TRUCK")
+        queued_slots = convoy_slots.get(convoy_key, []) if vs.current_slot is None else []
+        queued_paths = convoy_paths.get(convoy_key, []) if vs.current_slot is None else []
+        if not queued_slots and vs.current_slot is None and not prefer_shallow:
+            queued_slots = _find_fifo_slot_group(
+                empty_slots_by_block,
+                closed_blocks,
+                target_exit=TRAIN_EXIT if vs.next_mode == "RAIL" else TRUCK_EXIT,
+                prefer_block=prefer_block,
+                group_size=min(CONVOY_SIZE, _remaining_convoy_size(order, vs, convoy_key, grouping_constraints)),
+            )
+            convoy_slots[convoy_key] = queued_slots
+            if queued_slots:
+                queued_paths = _build_convoy_paths(
+                    queued_slots, reservation, start_time, vs.vehicle_id
+                )
+                convoy_paths[convoy_key] = queued_paths
+                # 이 군집의 경로는 지금 모두 확정됐다. 다음 군집은 80스텝 뒤에 연다.
+                next_departure_time[origin_road] = start_time + CONVOY_BUFFER
+
+        chosen_slot = queued_slots.pop(0) if queued_slots else None
+        path: list[mapf.TimedCell] = queued_paths.pop(0) if queued_paths else []
+        if chosen_slot is not None and not path:
+            path = _path_to_slot(vs, chosen_slot, reservation, start_time)
+        if chosen_slot is None or not path:
+            chosen_slot, path = _assign_slot(
+                vs, closed_blocks, empty_slots_by_block, reservation,
+                start_time=start_time, prefer_block=prefer_block, prefer_shallow=prefer_shallow,
+            )
 
         if chosen_slot is None:
             unplaced.append(vs.vehicle_id)
             continue
 
-        next_departure_time[origin_road] = start_time + 1
+        if not queued_paths and origin_road not in next_departure_time:
+            next_departure_time[origin_road] = start_time + 1
 
         reservation.reserve_path(path, vs.vehicle_id)
         _mark_slot_taken(empty_slots_by_block, chosen_slot)
@@ -276,7 +312,7 @@ def _assign_slot(
     prefer_block: str | None,
     prefer_shallow: bool,
 ) -> tuple[str | None, list[mapf.TimedCell]]:
-    candidate_blocks = list(empty_slots_by_block.keys() - closed_blocks)
+    candidate_blocks = sorted(empty_slots_by_block.keys() - closed_blocks)
     if prefer_block and prefer_block not in closed_blocks and empty_slots_by_block.get(prefer_block):
         candidate_blocks = [prefer_block]
 
@@ -296,9 +332,137 @@ def _assign_slot(
             path = mapf.space_time_astar(reservation, origin_road, goal_road, start_time, vs.vehicle_id)
         except mapf.PathNotFound:
             continue
-        return slot["slot_id"], path
+        return slot["slot_id"], _append_slot_entry(path, slot["slot_id"])
 
     return None, []
+
+
+def _remaining_convoy_size(
+    order: list[_VehicleState],
+    current: _VehicleState,
+    convoy_key: tuple[str | None, str],
+    grouping_constraints: list[ParsedConstraint],
+) -> int:
+    """현재 차량부터 연속된 같은 입차 군집 크기. 폐쇄 재배치 차량은 세지 않는다."""
+    start = order.index(current)
+    count = 0
+    for candidate in order[start:]:
+        key = (_group_key(candidate, grouping_constraints), candidate.next_mode or "TRUCK")
+        if candidate.current_slot is not None or key != convoy_key or count >= CONVOY_SIZE:
+            break
+        count += 1
+    return max(count, 1)
+
+
+def _find_fifo_slot_group(
+    empty_slots_by_block: dict[str, list[dict]],
+    closed_blocks: set[str],
+    *,
+    target_exit: mapf.Cell,
+    prefer_block: str | None,
+    group_size: int,
+) -> list[str]:
+    """같은 행의 연속 슬롯을 찾아 출구에 가까운 차가 convoy 선두가 되게 정렬한다."""
+    block_ids = sorted(empty_slots_by_block.keys() - closed_blocks)
+    if prefer_block in block_ids:
+        block_ids = [prefer_block]
+
+    candidates: list[tuple[int, list[dict]]] = []
+    for block_id in block_ids:
+        by_row: dict[int, list[dict]] = {}
+        for slot in empty_slots_by_block.get(block_id, []):
+            by_row.setdefault(slot["row"], []).append(slot)
+        for row_slots in by_row.values():
+            row_slots.sort(key=lambda slot: slot["col"])
+            for index in range(len(row_slots) - group_size + 1):
+                group = row_slots[index:index + group_size]
+                if any(group[i + 1]["col"] != group[i]["col"] + 1 for i in range(len(group) - 1)):
+                    continue
+                group.sort(key=lambda slot: _manhattan((slot["row"], slot["col"]), target_exit))
+                candidates.append((
+                    _manhattan((group[0]["row"], group[0]["col"]), target_exit),
+                    group,
+                ))
+
+    if not candidates:
+        return []
+    _, best = min(candidates, key=lambda item: item[0])
+    return [slot["slot_id"] for slot in best]
+
+
+def _path_to_slot(
+    vs: _VehicleState,
+    slot_id: str,
+    reservation: mapf.ReservationTable,
+    start_time: int,
+) -> list[mapf.TimedCell]:
+    origin_road = _access_road(vs.current_slot) if vs.current_slot else RAMP
+    row, col = ids.slot_cell(slot_id)
+    goal_road = yard_grid.block_at(row, col).access_road_cell(row, col)
+    try:
+        road_path = mapf.space_time_astar(
+            reservation, origin_road, goal_road, start_time, vs.vehicle_id
+        )
+    except mapf.PathNotFound:
+        return []
+    return _append_slot_entry(road_path, slot_id)
+
+
+def _build_convoy_paths(
+    slot_ids: list[str],
+    reservation: mapf.ReservationTable,
+    start_time: int,
+    leader_id: str,
+) -> list[list[mapf.TimedCell]]:
+    """노트북처럼 리더 경로 하나를 잘라 최대 5대의 꼬리물기 경로를 만든다.
+
+    ``slot_ids`` 는 출구에 가까운 선두 자리부터 뒤쪽 자리 순서다. 리더가 뒤쪽
+    슬롯으로 진입한 뒤 같은 행을 따라 선두 자리까지 전진하고, 뒤 차량은 끝을
+    한 칸씩 자른 동일 궤적을 1스텝 늦게 따른다.
+    """
+    if not slot_ids:
+        return []
+    rear_row, rear_col = ids.slot_cell(slot_ids[-1])
+    rear_road = yard_grid.block_at(rear_row, rear_col).access_road_cell(rear_row, rear_col)
+    try:
+        leader_path = mapf.space_time_astar(
+            reservation, RAMP, rear_road, start_time, leader_id
+        )
+    except mapf.PathNotFound:
+        return []
+
+    leader_path = _append_slot_entry(leader_path, slot_ids[-1])
+    row, col, time_step = leader_path[-1]
+    for slot_id in reversed(slot_ids[:-1]):
+        target_row, target_col = ids.slot_cell(slot_id)
+        if target_row != row or abs(target_col - col) != 1:
+            return []
+        col = target_col
+        time_step += 1
+        leader_path.append((row, col, time_step))
+
+    paths: list[list[mapf.TimedCell]] = []
+    for delay in range(len(slot_ids)):
+        trimmed = leader_path if delay == 0 else leader_path[:-delay]
+        paths.append([(row, col, t + delay) for row, col, t in trimmed])
+    return paths
+
+
+def _append_slot_entry(path: list[mapf.TimedCell], slot_id: str) -> list[mapf.TimedCell]:
+    """진입도로에서 끝난 MAPF 경로를 실제 주차 슬롯까지 한 칸씩 연장한다."""
+    if not path:
+        return path
+    target_row, target_col = ids.slot_cell(slot_id)
+    row, col, time_step = path[-1]
+    if col != target_col:
+        raise ValueError(f"진입도로와 슬롯 열이 다릅니다: {slot_id}")
+    step = 1 if target_row > row else -1
+    extended = list(path)
+    while row != target_row:
+        row += step
+        time_step += 1
+        extended.append((row, col, time_step))
+    return extended
 
 
 def _mark_slot_taken(empty_slots_by_block: dict[str, list[dict]], slot_id: str) -> None:
@@ -322,8 +486,8 @@ def _reason_for(vs: _VehicleState, closed_blocks: set[str]) -> str:
 
 
 def _path_distance_meters(path: list[mapf.TimedCell]) -> float:
-    # 경로는 진입도로 ↔ 진입도로만 잰다. 슬롯 자체까지 왕복 2칸을 더한다.
-    cells_moved = max(len(path) - 1, 0) + 2
+    # 이제 path 자체가 실제 슬롯까지 포함한다.
+    cells_moved = max(len(path) - 1, 0)
     return round(cells_moved * settings.meters_per_cell, 1)
 
 

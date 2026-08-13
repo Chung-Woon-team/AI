@@ -38,6 +38,7 @@ def test_new_vehicle_gets_placed_and_recorded_as_a_move():
     assert len(path) >= 2
     assert path[0].t < path[-1].t
     assert all(isinstance(step.row, int) and isinstance(step.col, int) for step in path)
+    assert (path[-1].row, path[-1].col) == ids.slot_cell(B01_SLOT_A)
     assert result.moves[0].reason == "신규 배치"
     assert result.moves[0].distance_meters > 0
     assert result.kpi.changed_vehicles == 1
@@ -156,3 +157,30 @@ def test_plan_version_chains_from_base():
 
     assert result.based_on_version == "B0"
     assert result.plan_version.startswith("B0-r")
+
+
+def test_five_new_vehicles_get_contiguous_fifo_slots_and_staggered_paths():
+    slots = [_slot(ids.make_slot_id(4, col)) for col in range(4, 10)]
+    vehicles = [
+        {
+            "vehicle_id": f"V-{index:04d}",
+            "status": "EXPECTED",
+            "next_mode": "ROAD",
+            "discharge_sequence": index,
+        }
+        for index in range(1, 6)
+    ]
+
+    result = replan.compute_replan(None, [], _yard_state(slots=slots), vehicles)
+
+    moves = sorted(result.moves, key=lambda move: move.sequence)
+    assigned = [ids.slot_cell(move.to_slot) for move in moves]
+    assert len(moves) == 5
+    assert len({row for row, _ in assigned}) == 1
+    assert sorted(col for _, col in assigned) == list(range(5, 10))
+    # 트럭 출구가 오른쪽이므로 선두 차량이 가장 오른쪽(출구 쪽) 슬롯을 받는다.
+    assert assigned[0][1] == 9
+    assert [move.path[0].t for move in moves] == [0, 1, 2, 3, 4]
+    for move in moves:
+        assert (move.path[-1].row, move.path[-1].col) == ids.slot_cell(move.to_slot)
+        assert all(b.t == a.t + 1 for a, b in zip(move.path, move.path[1:]))
